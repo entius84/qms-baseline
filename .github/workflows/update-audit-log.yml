@@ -1,0 +1,82 @@
+name: Auto-Update Master Audit Log CSV
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'records/**/*.md'
+
+permissions:
+  contents: write
+
+jobs:
+  update-csv:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Parse MD Reports & Rebuild master_audit_log.csv
+        run: |
+          node -e '
+          const fs = require("fs");
+          const path = require("path");
+
+          function globMdFiles(dir) {
+            let results = [];
+            if (!fs.existsSync(dir)) return results;
+            const list = fs.readdirSync(dir);
+            list.forEach(file => {
+              const filePath = path.join(dir, file);
+              const stat = fs.statSync(filePath);
+              if (stat && stat.isDirectory()) {
+                results = results.concat(globMdFiles(filePath));
+              } else if (filePath.endsWith(".md")) {
+                results.push(filePath);
+              }
+            });
+            return results;
+          }
+
+          const recordsDir = "./records";
+          const mdFiles = globMdFiles(recordsDir);
+          const rows = [["Timestamp", "Auditor", "Category", "Outcome", "RelatedTags", "Asset", "ReportPath"]];
+
+          mdFiles.forEach(file => {
+            const content = fs.readFileSync(file, "utf8");
+            const normalizedPath = file.replace(/\\/g, "/");
+
+            const auditor = (content.match(/\* \*\*Auditor:\*\* (.*)/) || [])[1] || "N/A";
+            const outcome = (content.match(/\* \*\*Audit Outcome:\*\* \*\*(.*?)\*\*/) || [])[1] || "N/A";
+            const tags = (content.match(/\* \*\*Related Cross-Tags:\*\* `(.*?)`/) || [])[1] || "None";
+            const timestamp = (content.match(/\* \*\*Timestamp:\*\* (.*)/) || [])[1] || "N/A";
+            const asset = (content.match(/\* \*\*Asset Number \/ Code:\*\* `(.*?)`/) || [])[1] || "N/A";
+            const category = (content.match(/## Audit Category: (.*)/) || [])[1] || "General";
+
+            rows.push([timestamp, auditor, category, outcome, tags, asset, normalizedPath]);
+          });
+
+          // Ordina i dati per timestamp decrescente (più recenti in alto)
+          const header = rows[0];
+          const dataRows = rows.slice(1).sort((a, b) => new Date(b[0]) - new Date(a[0]));
+          
+          const csvLines = [header.join(",")];
+          dataRows.forEach(r => {
+            csvLines.push(r.map(v => `"${v.replace(/"/g, "\"\"")}"`).join(","));
+          });
+
+          fs.writeFileSync("./records/master_audit_log.csv", csvLines.join("\n") + "\n");
+          '
+
+      - name: Commit and Push Updated CSV
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action Bot"
+          git add records/master_audit_log.csv
+          git diff --staged --quiet || (git commit -m "chore: auto-update master_audit_log.csv [skip ci]" && git push)
